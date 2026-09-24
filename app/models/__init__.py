@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, Boolean, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, Boolean, JSON, UniqueConstraint, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -145,6 +145,18 @@ class Dataset(Base):
     versions = relationship("DatasetVersion", back_populates="dataset", cascade="all, delete-orphan")
     reviews = relationship("DatasetReview", back_populates="dataset", cascade="all, delete-orphan")
     subscriptions = relationship("DatasetSubscription", back_populates="dataset", cascade="all, delete-orphan")
+    upstream_derivations = relationship(
+        "DatasetDerivation",
+        foreign_keys="DatasetDerivation.upstream_dataset_id",
+        back_populates="upstream_dataset",
+        cascade="all, delete-orphan",
+    )
+    downstream_derivations = relationship(
+        "DatasetDerivation",
+        foreign_keys="DatasetDerivation.downstream_dataset_id",
+        back_populates="downstream_dataset",
+        cascade="all, delete-orphan",
+    )
 
 
 class DatasetItem(Base):
@@ -194,8 +206,17 @@ class DatasetVersion(Base):
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    # 版本级发布标记：审核通过时置为 True；只有显式撤销发布才置 False。
+    # 数据集改名、创建新版本草稿都不影响历史已发布版本，谱系边因此可固定在该版本上。
+    is_published = Column(Boolean, nullable=False, default=False, index=True)
+
     dataset = relationship("Dataset", back_populates="versions")
     reuse_records = relationship("DatasetReuse", back_populates="version")
+    upstream_derivations = relationship(
+        "DatasetDerivation",
+        foreign_keys="DatasetDerivation.upstream_version_id",
+        back_populates="upstream_version",
+    )
 
 
 class DatasetReview(Base):
@@ -224,3 +245,60 @@ class DatasetSubscription(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     dataset = relationship("Dataset", back_populates="subscriptions")
+
+
+class DatasetDerivation(Base):
+    """数据集派生谱系边：downstream 基于 upstream 的某个已发布版本加工而成。
+
+    边在创建时固定上游版本及其名称快照，之后数据集改名、发布新版本都不会改写
+    历史边；上游撤销发布时通过 upstream_published 快照将该边标记为失效，边本身
+    保留，谱系仍可追溯。(upstream_version_id, downstream_dataset_id) 唯一，
+    重复边在数据库层被拒绝。
+    """
+
+    __tablename__ = "dataset_derivations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    upstream_dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=False, index=True)
+    upstream_version_id = Column(Integer, ForeignKey("dataset_versions.id"), nullable=False)
+    downstream_dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=False, index=True)
+
+    # 创建时固定的不可变快照，数据集改名或新版本发布均不改写历史关系
+    upstream_name_snapshot = Column(String(200), nullable=False)
+    upstream_version_label_snapshot = Column(String(20), nullable=False)
+    downstream_name_snapshot = Column(String(200), nullable=False)
+    purpose = Column(String(200), nullable=False)
+    project_name = Column(String(200), nullable=True)
+    created_by = Column(String(100), nullable=True)
+
+    # 上游版本在创建时必须已发布；撤销发布后置为 False，边标记为失效但不删除
+    upstream_published = Column(Boolean, nullable=False, default=True, index=True)
+    invalidated_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    upstream_dataset = relationship(
+        "Dataset", foreign_keys=[upstream_dataset_id], back_populates="upstream_derivations"
+    )
+    downstream_dataset = relationship(
+        "Dataset", foreign_keys=[downstream_dataset_id], back_populates="downstream_derivations"
+    )
+    upstream_version = relationship(
+        "DatasetVersion", foreign_keys=[upstream_version_id], back_populates="upstream_derivations"
+    )
+
+    @property
+    def upstream_version_label(self) -> str:
+        return self.upstream_version_label_snapshot
+
+    @property
+    def invalidated(self) -> bool:
+        return not self.upstream_published
+
+    __table_args__ = (
+        UniqueConstraint(
+            "upstream_version_id", "downstream_dataset_id",
+            name="uq_derivation_upstream_version_downstream"
+        ),
+        Index("ix_derivations_up_ds", "upstream_dataset_id", "upstream_published"),
+        Index("ix_derivations_down_ds", "downstream_dataset_id", "upstream_published"),
+    )

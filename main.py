@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import engine, Base
-from app.routers import common, operation, dataset, analytics
+from app.routers import common, operation, dataset, analytics, lineage
 
 
 def create_tables():
@@ -41,8 +41,15 @@ app = FastAPI(
 
 ### 数据集管理
 - 数据集打包与发布
-- 优质数据集公开供其他团队复用
+### 数据集复用
+- 团队复用已发布数据集
 - 复用次数统计（关联具体版本）
+
+### 派生谱系
+- 创建派生关系时固定上游版本、用途与名称快照
+- 拒绝循环、跨越未发布版本及重复边（并发相反方向建边也不成环）
+- 按上游/下游方向分层查询，标出因撤销发布而失效的链路
+- 历史关系不随数据集改名或新版本发布而改写
 
 ### 数据集审核
 - 提交审核 → 审核（通过/驳回） → 发布
@@ -85,6 +92,7 @@ app.include_router(common.router, prefix=api_prefix)
 app.include_router(operation.router, prefix=api_prefix)
 app.include_router(dataset.router, prefix=api_prefix)
 app.include_router(analytics.router, prefix=api_prefix)
+app.include_router(lineage.router, prefix=api_prefix)
 
 
 @app.get("/", tags=["首页"])

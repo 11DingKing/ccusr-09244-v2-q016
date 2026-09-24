@@ -176,9 +176,93 @@ class DatasetVersionResponse(BaseModel):
     data_grade: Optional[str] = None
     created_by: Optional[str] = None
     created_at: datetime
+    is_published: bool = False
 
     class Config:
         from_attributes = True
+
+
+class DatasetDerivationCreate(BaseModel):
+    upstream_dataset_id: int = Field(..., description="被复用的上游数据集ID")
+    upstream_version_id: int = Field(..., description="固定引用的上游已发布版本ID")
+    downstream_dataset_id: int = Field(..., description="再加工产出的下游数据集ID")
+    purpose: str = Field(..., min_length=1, max_length=200, description="用途说明，创建后随关系固定")
+    project_name: Optional[str] = Field(None, max_length=200, description="项目名称")
+    created_by: Optional[str] = Field(None, max_length=100, description="创建人")
+
+
+class DatasetDerivationResponse(BaseModel):
+    id: int
+    upstream_dataset_id: int
+    upstream_version_id: int
+    upstream_version_label: str
+    upstream_name_snapshot: str
+    downstream_dataset_id: int
+    downstream_name_snapshot: str
+    purpose: str
+    project_name: Optional[str] = None
+    created_by: Optional[str] = None
+    upstream_published: bool
+    invalidated: bool
+    invalidated_at: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class LineageEdgeResponse(BaseModel):
+    id: int
+    upstream_dataset_id: int
+    upstream_version_id: int
+    upstream_version_label: str
+    upstream_name_snapshot: str
+    downstream_dataset_id: int
+    downstream_name_snapshot: str
+    purpose: str
+    project_name: Optional[str] = None
+    created_by: Optional[str] = None
+    upstream_published: bool
+    invalidated: bool
+    invalidated_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class LineageLayerNodeResponse(BaseModel):
+    dataset_id: int
+    name: str
+    invalidated: bool = Field(..., description="是否已无全有效路径可达（链路因撤销发布失效）")
+    edges: List[LineageEdgeResponse] = Field(..., description="进入该节点的派生边")
+
+
+class LineageLayerResponse(BaseModel):
+    depth: int
+    nodes: List[LineageLayerNodeResponse]
+
+
+class LineageRootResponse(BaseModel):
+    dataset_id: int
+    name: str
+
+
+class LineageResponse(BaseModel):
+    root: LineageRootResponse
+    direction: str
+    max_depth: int
+    limit: int
+    include_invalidated: bool
+    total_edges: int
+    returned_edges: int
+    truncated: bool
+    layers: List[LineageLayerResponse]
+
+
+class DerivationListResponse(BaseModel):
+    items: List[LineageEdgeResponse]
+    total: int
+    skip: int
+    limit: int
+    truncated: bool
 
 
 class DatasetReviewAction(BaseModel):

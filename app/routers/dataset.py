@@ -10,6 +10,7 @@ from app.models import (
     OperationData, Annotation, RobotModel, Scene
 )
 from app.services.aggregation import compute_dataset_quality_stats
+from app.services.lineage import apply_publication_revocation
 from app.schemas.dataset import (
     DatasetCreate, DatasetUpdate, DatasetResponse,
     DatasetItemAddRequest, DatasetItemRemoveRequest,
@@ -323,6 +324,7 @@ def review_dataset(dataset_id: int, req: DatasetReviewAction, db: Session = Depe
             change_description=req.review_notes or "审核通过，发布新版本",
             created_by=req.reviewer
         )
+        version.is_published = True
         dataset.current_version = version.version_number
         dataset.version = version.version_label
 
@@ -346,6 +348,7 @@ def review_dataset(dataset_id: int, req: DatasetReviewAction, db: Session = Depe
         dataset.review_status = "draft"
         dataset.is_published = False
         dataset.published_at = None
+        apply_publication_revocation(db, dataset.id)
 
     review = DatasetReview(
         dataset_id=dataset.id,
@@ -382,6 +385,15 @@ def publish_dataset(dataset_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="数据集为空，无法发布")
     dataset.is_published = True
     dataset.published_at = datetime.now(timezone.utc)
+
+    # 与审核通过保持一致：当前版本随发布变为可被谱系引用的已发布版本。
+    current_version = db.query(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset_id,
+        DatasetVersion.version_number == dataset.current_version,
+    ).first()
+    if current_version and not current_version.is_published:
+        current_version.is_published = True
+
     db.commit()
     db.refresh(dataset)
     return dataset
@@ -395,6 +407,7 @@ def unpublish_dataset(dataset_id: int, db: Session = Depends(get_db)):
     dataset.is_published = False
     dataset.published_at = None
     dataset.review_status = "draft"
+    apply_publication_revocation(db, dataset.id)
     db.commit()
     db.refresh(dataset)
     return dataset
