@@ -3,16 +3,34 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import engine, Base
-from app.routers import common, operation, dataset, analytics
+from app.routers import common, operation, dataset, analytics, lineage
 
 
 def create_tables():
-    import os
-    db_path = settings.DATABASE_URL.replace("sqlite:///", "")
-    if not os.path.exists(db_path):
-        Base.metadata.create_all(bind=engine)
-    else:
-        Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    _ensure_lineage_columns()
+
+
+def _ensure_lineage_columns():
+    """为旧库补充版本级发布状态列（SQLite 轻量迁移）。"""
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(dataset_versions)"))}
+        added_published = "is_published" not in cols
+        if added_published:
+            conn.execute(text(
+                "ALTER TABLE dataset_versions ADD COLUMN is_published BOOLEAN DEFAULT 0 NOT NULL"
+            ))
+        if "unpublished_at" not in cols:
+            conn.execute(text(
+                "ALTER TABLE dataset_versions ADD COLUMN unpublished_at DATETIME"
+            ))
+        if added_published:
+            # 仅在旧库首次升级时回填，之后以版本级状态为准
+            conn.execute(text(
+                "UPDATE dataset_versions SET is_published = 1 "
+                "WHERE dataset_id IN (SELECT id FROM datasets WHERE is_published = 1)"
+            ))
 
 
 create_tables()
@@ -85,6 +103,7 @@ app.include_router(common.router, prefix=api_prefix)
 app.include_router(operation.router, prefix=api_prefix)
 app.include_router(dataset.router, prefix=api_prefix)
 app.include_router(analytics.router, prefix=api_prefix)
+app.include_router(lineage.router, prefix=api_prefix)
 
 
 @app.get("/", tags=["首页"])

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, Boolean, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, Boolean, JSON, UniqueConstraint, CheckConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -194,6 +194,10 @@ class DatasetVersion(Base):
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    # 版本级发布状态：撤销发布只影响该版本，历史派生边据此判定失效
+    is_published = Column(Boolean, default=False, nullable=False, index=True)
+    unpublished_at = Column(DateTime(timezone=True), nullable=True)
+
     dataset = relationship("Dataset", back_populates="versions")
     reuse_records = relationship("DatasetReuse", back_populates="version")
 
@@ -224,3 +228,59 @@ class DatasetSubscription(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     dataset = relationship("Dataset", back_populates="subscriptions")
+
+
+class DatasetDerivation(Base):
+    """数据集版本之间的派生（谱系）边：下游版本基于上游版本再加工。
+
+    边在创建时固定两端的具体版本及其名称快照，之后数据集改名、发布新版本
+    都不会改写历史关系；版本被撤销发布时只标记失效，不删除边。
+    """
+
+    __tablename__ = "dataset_derivations"
+    __table_args__ = (
+        UniqueConstraint(
+            "upstream_version_id", "downstream_version_id",
+            name="uq_derivation_edge"
+        ),
+        CheckConstraint(
+            "upstream_version_id <> downstream_version_id",
+            name="ck_derivation_not_self"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    upstream_dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=False, index=True)
+    upstream_version_id = Column(Integer, ForeignKey("dataset_versions.id"), nullable=False, index=True)
+    downstream_dataset_id = Column(Integer, ForeignKey("datasets.id"), nullable=False, index=True)
+    downstream_version_id = Column(Integer, ForeignKey("dataset_versions.id"), nullable=False, index=True)
+
+    purpose = Column(String(200), nullable=False)
+    created_by = Column(String(100), nullable=True)
+
+    # 创建时固定的快照，保证历史关系不被改名影响
+    upstream_dataset_name = Column(String(200), nullable=False)
+    upstream_version_label = Column(String(20), nullable=False)
+    downstream_dataset_name = Column(String(200), nullable=False)
+    downstream_version_label = Column(String(20), nullable=False)
+
+    # 撤销发布只置失效位，边本身保留以维持谱系可追溯
+    invalidated_at = Column(DateTime(timezone=True), nullable=True)
+    invalidate_reason = Column(String(100), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    upstream_version = relationship("DatasetVersion", foreign_keys=[upstream_version_id])
+    downstream_version = relationship("DatasetVersion", foreign_keys=[downstream_version_id])
+
+    @property
+    def is_active(self) -> bool:
+        return self.invalidated_at is None
+
+
+class LineageLock(Base):
+    """单行哨兵表：派生关系写入前先抢占该行，串行化并发创建以防止成环。"""
+
+    __tablename__ = "lineage_lock"
+
+    id = Column(Integer, primary_key=True, autoincrement=False)

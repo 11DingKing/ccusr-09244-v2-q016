@@ -176,6 +176,8 @@ class DatasetVersionResponse(BaseModel):
     data_grade: Optional[str] = None
     created_by: Optional[str] = None
     created_at: datetime
+    is_published: bool = False
+    unpublished_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -224,3 +226,71 @@ class ReviewStatusStats(BaseModel):
     approved: int = 0
     rejected: int = 0
     published: int = 0
+
+
+class DatasetDerivationCreate(BaseModel):
+    upstream_version_id: int = Field(..., description="上游数据集版本ID（被复用的已发布版本）")
+    downstream_version_id: int = Field(..., description="下游数据集版本ID（再加工产出的已发布版本）")
+    purpose: str = Field(..., min_length=1, max_length=200, description="派生用途，创建后固定")
+    created_by: Optional[str] = Field(None, max_length=100, description="创建人")
+
+
+class DatasetDerivationResponse(BaseModel):
+    id: int
+    upstream_dataset_id: int
+    upstream_version_id: int
+    downstream_dataset_id: int
+    downstream_version_id: int
+    purpose: str
+    created_by: Optional[str] = None
+    upstream_dataset_name: str
+    upstream_version_label: str
+    downstream_dataset_name: str
+    downstream_version_label: str
+    is_active: bool
+    invalidated_at: Optional[datetime] = None
+    invalidate_reason: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class LineageNode(BaseModel):
+    dataset_id: int
+    version_id: int
+    dataset_name: str
+    version_label: str
+    owner_team: Optional[str] = None
+    # 版本实时状态：撤销发布后 invalidated=True
+    version_published: bool
+    invalidated: bool
+    # 从根到该节点的整条链路是否仍有效（版本撤销或路径上任一边失效即为 True）
+    path_invalidated: bool = False
+    # 连接到遍历方向上前一层的边
+    edge_id: Optional[int] = None
+    purpose: Optional[str] = None
+    edge_active: bool = True
+    edge_invalidated_at: Optional[datetime] = None
+    edge_invalidate_reason: Optional[str] = None
+
+
+class LineageLayer(BaseModel):
+    depth: int
+    total_count: int
+    returned_count: int
+    truncated: bool
+    nodes: List[LineageNode]
+
+
+class LineageResponse(BaseModel):
+    root_version_id: int
+    direction: str
+    max_depth: int
+    layers: List[LineageLayer]
+    total_edges: int
+    returned_edges: int
+    # 因合流到已在更浅层出现过的版本而未单独展示的边数
+    merged_edges: int = 0
+    truncated: bool
+    depth_truncated: bool

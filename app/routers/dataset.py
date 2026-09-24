@@ -10,6 +10,7 @@ from app.models import (
     OperationData, Annotation, RobotModel, Scene
 )
 from app.services.aggregation import compute_dataset_quality_stats
+from app.services import lineage as lineage_service
 from app.schemas.dataset import (
     DatasetCreate, DatasetUpdate, DatasetResponse,
     DatasetItemAddRequest, DatasetItemRemoveRequest,
@@ -94,6 +95,25 @@ def _notify_subscribers(db: Session, dataset: Dataset, version: DatasetVersion):
             "message": f"数据集 '{dataset.name}' 已发布新版本 {version.version_label}"
         })
     return notifications
+
+
+def _mark_version_published(version: DatasetVersion):
+    version.is_published = True
+    version.unpublished_at = None
+
+
+def _unpublish_current_version(db: Session, dataset: Dataset, reason: str):
+    """撤销发布当前版本：版本级状态置未发布，派生边置失效（边保留不删）。"""
+    version = db.query(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset.id,
+        DatasetVersion.version_number == dataset.current_version,
+    ).order_by(DatasetVersion.id.desc()).first()
+    invalidated = 0
+    if version and version.is_published:
+        version.is_published = False
+        version.unpublished_at = datetime.now(timezone.utc)
+        invalidated = lineage_service.invalidate_edges_for_version(db, version.id, reason)
+    return invalidated
 
 
 @router.get("/datasets", response_model=List[DatasetResponse], tags=["数据集管理"])
@@ -326,6 +346,7 @@ def review_dataset(dataset_id: int, req: DatasetReviewAction, db: Session = Depe
         dataset.current_version = version.version_number
         dataset.version = version.version_label
 
+        _mark_version_published(version)
         dataset.is_published = True
         dataset.published_at = datetime.now(timezone.utc)
 
@@ -346,6 +367,7 @@ def review_dataset(dataset_id: int, req: DatasetReviewAction, db: Session = Depe
         dataset.review_status = "draft"
         dataset.is_published = False
         dataset.published_at = None
+        _unpublish_current_version(db, dataset, "审核撤销发布")
 
     review = DatasetReview(
         dataset_id=dataset.id,
@@ -382,6 +404,12 @@ def publish_dataset(dataset_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="数据集为空，无法发布")
     dataset.is_published = True
     dataset.published_at = datetime.now(timezone.utc)
+    current = db.query(DatasetVersion).filter(
+        DatasetVersion.dataset_id == dataset_id,
+        DatasetVersion.version_number == dataset.current_version,
+    ).order_by(DatasetVersion.id.desc()).first()
+    if current:
+        _mark_version_published(current)
     db.commit()
     db.refresh(dataset)
     return dataset
@@ -392,6 +420,7 @@ def unpublish_dataset(dataset_id: int, db: Session = Depends(get_db)):
     dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
     if not dataset:
         raise HTTPException(status_code=404, detail="数据集不存在")
+    _unpublish_current_version(db, dataset, "撤销发布")
     dataset.is_published = False
     dataset.published_at = None
     dataset.review_status = "draft"
@@ -409,28 +438,27 @@ def create_dataset_version(dataset_id: int, req: DatasetVersionCreate, db: Sessi
     if dataset.review_status == "pending_review":
         raise HTTPException(status_code=400, detail="数据集正在审核中，无法创建新版本")
 
-    _create_version_snapshot(db, dataset, change_description=req.change_description, created_by=req.created_by)
-
-    dataset.current_version += 1
-    new_version_number = dataset.current_version
+    new_version_number = (dataset.current_version or 1) + 1
     version_parts = dataset.version.split(".")
     if len(version_parts) == 2:
-        minor = int(version_parts[1]) + 1
-        new_label = f"{version_parts[0]}.{minor}"
+        new_label = f"{version_parts[0]}.{int(version_parts[1]) + 1}"
     else:
         new_label = str(new_version_number)
+
+    dataset.current_version = new_version_number
     dataset.version = new_label
     dataset.review_status = "draft"
     dataset.is_published = False
     dataset.published_at = None
 
-    db.commit()
-    db.flush()
+    # 快照必须使用递增后的新版本号，否则会与旧版本号重复
+    new_version = _create_version_snapshot(
+        db, dataset,
+        change_description=req.change_description,
+        created_by=req.created_by,
+    )
 
-    new_version = db.query(DatasetVersion).filter(
-        DatasetVersion.dataset_id == dataset_id,
-        DatasetVersion.version_number == new_version_number
-    ).first()
+    db.commit()
     db.refresh(new_version)
     return new_version
 
